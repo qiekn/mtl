@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+ColumnLimit: 120
+DerivePointerAlignment: false
+PointerAlignment: Right
+ColumnLimit: 120
+
+IncludeBlocks: Preserve
+
+AccessModifierOffset: -2
