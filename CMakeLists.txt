@@ -1,32 +1,22 @@
 cmake_minimum_required(VERSION 3.15)
-project(my_project)
+
+project(mystl)
+
+# Version
+set(VERSION_MAJOR 0)
+set(VERSION_MINOR 0)
+set(VERSION_PATCH 0)
 
 # GoogleTest requires at least C++17
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Generate compile_commands.json for Neovim Lsp client
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-# For Windows: Prevent overriding the parent project's compiler/linker settings
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# Build type
+set(CMAKE_BUILD_TYPE release)
 
-enable_testing()
+# TODO: Add Googletest
 
-add_executable(
-  hello_test
-  hello_test.cpp
-)
-target_link_libraries(
-  hello_test
-  GTest::gtest_main
-)
-
-include(GoogleTest)
-gtest_discover_tests(hello_test)
+add_subdirectory(${PROJECT_SOURCE_DIR}/test)
