@@ -1,10 +1,6 @@
-#include <iostream>
-#include "print.h"
+#include <gtest/gtest.h>
 
-int main() {
-  std::cout << "hello, world" << std::endl;
-
-  Print();
-
-  return 0;
+// 一个简单的测试，验证 GoogleTest 配置正确
+TEST(SetupTest, GoogleTestWorks) {
+  EXPECT_EQ(1 + 1, 2);
 }
