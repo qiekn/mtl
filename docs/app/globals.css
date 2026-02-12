@@ -83,6 +83,42 @@ body {
   color: #60a5fa;
 }
 
+/* Prose table styles */
+.prose :where(table) {
+  width: 100% !important;
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.prose :where(thead tr) {
+  background: color-mix(in srgb, var(--foreground) 8%, var(--background));
+}
+
+.prose :where(th) {
+  padding: 0.75rem 1rem !important;
+  font-weight: 500;
+  text-align: left;
+  border: none !important;
+}
+
+.prose :where(td) {
+  padding: 0.625rem 1rem !important;
+  border: none !important;
+}
+
+.prose :where(tbody tr) {
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  transition: background-color 0.15s;
+}
+
+.prose :where(tbody tr:hover) {
+  background: color-mix(in srgb, var(--foreground) 5%, var(--background));
+}
+
 /* Apply mono font to shiki code blocks */
 .shiki,
 .shiki code {

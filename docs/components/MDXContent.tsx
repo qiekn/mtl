@@ -1,4 +1,5 @@
 import { MDXRemote } from "next-mdx-remote/rsc";
+import remarkGfm from "remark-gfm";
 import { codeToHtml } from "shiki";
 
 // Code block (```cpp ... ```)
@@ -79,5 +80,11 @@ const components = {
 };
 
 export function MDXContent({ source }: { source: string }) {
-  return <MDXRemote source={source} components={components} />;
+  return (
+    <MDXRemote
+      source={source}
+      components={components}
+      options={{ mdxOptions: { remarkPlugins: [remarkGfm] } }}
+    />
+  );
 }
