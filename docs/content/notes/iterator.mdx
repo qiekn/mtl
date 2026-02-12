@@ -1,0 +1,358 @@
+---
+title: "iterator - 迭代器"
+date: "2025-02-10"
+tags: ["stl", "iterator", "tag-dispatch", "template"]
+order: 2
+toc: true
+---
+
+## 为什么需要迭代器？
+
+STL 的设计哲学是将**容器**和**算法**解耦。算法不直接操作容器，而是通过迭代器这个"中间人"来访问元素。
+
+```
+容器 ──提供──> 迭代器 <──使用── 算法
+```
+
+这样做的好处：`sort` 算法不需要知道数据存在 `vector` 还是 `deque` 里，只要有迭代器就行。
+
+但不同容器的能力不同——数组支持随机跳转（`p + 5`），链表只能逐个前进（`++p`）。算法需要在编译期知道迭代器的能力，才能选择最优策略。
+
+## 五种迭代器类别
+
+STL 定义了五种迭代器类别，能力依次递增：
+
+| 类别 | 能力 | 典型容器 |
+|------|------|----------|
+| Input Iterator | 只读、单向、单遍 | `istream_iterator` |
+| Output Iterator | 只写、单向、单遍 | `ostream_iterator` |
+| Forward Iterator | 读写、单向、多遍 | `forward_list` |
+| Bidirectional Iterator | 读写、双向 | `list`, `set`, `map` |
+| Random Access Iterator | 读写、随机跳转 | `vector`, `deque`, 原生指针 |
+
+继承关系表示"超集"——Bidirectional 拥有 Forward 的全部能力，再加上后退。
+
+## Tag Dispatch：编译期选择策略
+
+核心思想：用空结构体表示迭代器类别，通过继承关系和函数重载，让编译器在编译期自动选择最优实现。
+
+### 第一步：定义 Tag
+
+```cpp
+struct input_iterator_tag {};
+struct output_iterator_tag {};
+struct forward_iterator_tag : public input_iterator_tag {};
+struct bidirectional_iterator_tag : public forward_iterator_tag {};
+struct random_access_iterator_tag : public bidirectional_iterator_tag {};
+```
+
+继承让 tag 之间有了"is-a"关系。`random_access_iterator_tag` 可以隐式转换为 `input_iterator_tag`，这使得重载决议能自动匹配最优版本。
+
+### 第二步：Tag Dispatch 实战
+
+以 `distance` 为例——计算两个迭代器之间的距离：
+
+```cpp
+// Input Iterator：只能一步一步数，O(n)
+template <class InputIterator>
+typename iterator_traits<InputIterator>::difference_type
+distance_dispatch(InputIterator first, InputIterator last,
+                  input_iterator_tag) {
+  typename iterator_traits<InputIterator>::difference_type n = 0;
+  while (first != last) {
+    ++first;
+    ++n;
+  }
+  return n;
+}
+
+// Random Access Iterator：直接相减，O(1)
+template <class RandomIterator>
+typename iterator_traits<RandomIterator>::difference_type
+distance_dispatch(RandomIterator first, RandomIterator last,
+                  random_access_iterator_tag) {
+  return last - first;
+}
+```
+
+调用时传入一个 tag 对象，编译器自动选择：
+
+```cpp
+template <class InputIterator>
+typename iterator_traits<InputIterator>::difference_type
+distance(InputIterator first, InputIterator last) {
+  typedef typename iterator_traits<InputIterator>::iterator_category category;
+  return distance_dispatch(first, last, category());
+  //                                    ^^^^^^^^^^
+  //                     构造一个 tag 对象，触发重载决议
+}
+```
+
+## Iterator Base Class
+
+自定义迭代器需要提供五个关联类型。为了方便，定义一个基类模板：
+
+```cpp
+template <class Category, class T, class Distance = ptrdiff_t,
+          class Pointer = T*, class Reference = T&>
+struct iterator {
+  typedef Category  iterator_category;
+  typedef T         value_type;
+  typedef Distance  difference_type;
+  typedef Pointer   pointer;
+  typedef Reference reference;
+};
+```
+
+这里的 `typedef` 不是定义变量，而是在结构体内部创建类型别名。这样外部就能通过 `Iterator::value_type` 来获取迭代器指向的元素类型。
+
+## Iterator Traits
+
+问题：原生指针（如 `int*`）没有嵌套的 `typedef`，但它是天然的 Random Access Iterator。怎么统一？
+
+答案：加一层间接——`iterator_traits` 模板：
+
+```cpp
+// 主模板：从迭代器类的 typedef 中提取
+template <class Iterator>
+struct iterator_traits {
+  typedef typename Iterator::iterator_category iterator_category;
+  typedef typename Iterator::value_type        value_type;
+  typedef typename Iterator::difference_type   difference_type;
+  typedef typename Iterator::pointer           pointer;
+  typedef typename Iterator::reference         reference;
+};
+```
+
+注意 `typename` 关键字——因为 `Iterator` 是模板参数，编译器不知道 `Iterator::value_type` 是类型还是静态成员，`typename` 告诉编译器"这是一个类型"。
+
+### 指针特化
+
+```cpp
+// T* 特化
+template <class T>
+struct iterator_traits<T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;
+  typedef ptrdiff_t                  difference_type;
+  typedef T*                         pointer;
+  typedef T&                         reference;
+};
+
+// const T* 特化
+template <class T>
+struct iterator_traits<const T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;  // 注意：不带 const
+  typedef ptrdiff_t                  difference_type;
+  typedef const T*                   pointer;
+  typedef const T&                   reference;
+};
+```
+
+`const T*` 特化中，`value_type` 是 `T` 而非 `const T`——这是 STL 的约定，`value_type` 表示"元素的纯粹类型"。
+
+## advance 的三种分派
+
+`advance` 将迭代器前移（或后退）n 步，需要三种实现：
+
+```cpp
+// Input Iterator：只能前进
+template <class InputIterator, class Distance>
+void advance_dispatch(InputIterator& i, Distance n, input_iterator_tag) {
+  while (n--) ++i;
+}
+
+// Bidirectional Iterator：可以后退
+template <class BidirectionalIterator, class Distance>
+void advance_dispatch(BidirectionalIterator& i, Distance n,
+                      bidirectional_iterator_tag) {
+  if (n >= 0)
+    while (n--) ++i;
+  else
+    while (n++) --i;
+}
+
+// Random Access Iterator：O(1) 跳转
+template <class RandomIterator, class Distance>
+void advance_dispatch(RandomIterator& i, Distance n,
+                      random_access_iterator_tag) {
+  i += n;
+}
+```
+
+## 完整实现
+
+```cpp
+#pragma once
+
+#include <cstddef>
+
+namespace mystl {
+
+struct input_iterator_tag {};
+struct output_iterator_tag {};
+struct forward_iterator_tag : public input_iterator_tag {};
+struct bidirectional_iterator_tag : public forward_iterator_tag {};
+struct random_access_iterator_tag : public bidirectional_iterator_tag {};
+
+template <class Category, class T, class Distance = ptrdiff_t,
+          class Pointer = T*, class Reference = T&>
+struct iterator {
+  typedef Category  iterator_category;
+  typedef T         value_type;
+  typedef Distance  difference_type;
+  typedef Pointer   pointer;
+  typedef Reference reference;
+};
+
+template <class Iterator>
+struct iterator_traits {
+  typedef typename Iterator::iterator_category iterator_category;
+  typedef typename Iterator::value_type        value_type;
+  typedef typename Iterator::difference_type   difference_type;
+  typedef typename Iterator::pointer           pointer;
+  typedef typename Iterator::reference         reference;
+};
+
+template <class T>
+struct iterator_traits<T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;
+  typedef ptrdiff_t                  difference_type;
+  typedef T*                         pointer;
+  typedef T&                         reference;
+};
+
+template <class T>
+struct iterator_traits<const T*> {
+  typedef random_access_iterator_tag iterator_category;
+  typedef T                          value_type;
+  typedef ptrdiff_t                  difference_type;
+  typedef const T*                   pointer;
+  typedef const T&                   reference;
+};
+
+template <class Iterator>
+using iter_difference_t = typename iterator_traits<Iterator>::difference_type;
+
+template <class Iterator>
+using iter_value_t = typename iterator_traits<Iterator>::value_type;
+
+template <class InputIterator>
+typename iterator_traits<InputIterator>::difference_type
+distance_dispatch(InputIterator first, InputIterator last,
+                  input_iterator_tag) {
+  typename iterator_traits<InputIterator>::difference_type n = 0;
+  while (first != last) {
+    ++first;
+    ++n;
+  }
+  return n;
+}
+
+template <class RandomIterator>
+typename iterator_traits<RandomIterator>::difference_type
+distance_dispatch(RandomIterator first, RandomIterator last,
+                  random_access_iterator_tag) {
+  return last - first;
+}
+
+template <class InputIterator>
+typename iterator_traits<InputIterator>::difference_type
+distance(InputIterator first, InputIterator last) {
+  typedef typename iterator_traits<InputIterator>::iterator_category category;
+  return distance_dispatch(first, last, category());
+}
+
+template <class InputIterator, class Distance>
+void advance_dispatch(InputIterator& i, Distance n, input_iterator_tag) {
+  while (n--) ++i;
+}
+
+template <class BidirectionalIterator, class Distance>
+void advance_dispatch(BidirectionalIterator& i, Distance n,
+                      bidirectional_iterator_tag) {
+  if (n >= 0)
+    while (n--) ++i;
+  else
+    while (n++) --i;
+}
+
+template <class RandomIterator, class Distance>
+void advance_dispatch(RandomIterator& i, Distance n,
+                      random_access_iterator_tag) {
+  i += n;
+}
+
+template <class InputIterator, class Distance>
+void advance(InputIterator& i, Distance n) {
+  typedef typename iterator_traits<InputIterator>::iterator_category category;
+  advance_dispatch(i, n, category());
+}
+
+}  // namespace mystl
+```
+
+## 单元测试
+
+```cpp
+#include "iterator.h"
+#include <gtest/gtest.h>
+
+TEST(IteratorTraitsTest, PointerTraits) {
+  using traits = mystl::iterator_traits<int*>;
+  static_assert(
+      std::is_same<traits::iterator_category,
+                   mystl::random_access_iterator_tag>::value);
+  static_assert(std::is_same<traits::value_type, int>::value);
+  static_assert(std::is_same<traits::pointer, int*>::value);
+  static_assert(std::is_same<traits::reference, int&>::value);
+}
+
+TEST(IteratorTraitsTest, ConstPointerTraits) {
+  using traits = mystl::iterator_traits<const int*>;
+  static_assert(
+      std::is_same<traits::iterator_category,
+                   mystl::random_access_iterator_tag>::value);
+  static_assert(std::is_same<traits::value_type, int>::value);
+  static_assert(std::is_same<traits::pointer, const int*>::value);
+  static_assert(std::is_same<traits::reference, const int&>::value);
+}
+
+TEST(DistanceTest, WithPointer) {
+  int arr[] = {1, 2, 3, 4, 5};
+  EXPECT_EQ(mystl::distance(arr, arr + 5), 5);
+  EXPECT_EQ(mystl::distance(arr, arr), 0);
+  EXPECT_EQ(mystl::distance(arr + 1, arr + 3), 2);
+}
+
+TEST(AdvanceTest, ForwardWithPointer) {
+  int arr[] = {1, 2, 3, 4, 5};
+  int* p = arr;
+  mystl::advance(p, 3);
+  EXPECT_EQ(*p, 4);
+}
+
+TEST(AdvanceTest, BackwardWithPointer) {
+  int arr[] = {1, 2, 3, 4, 5};
+  int* p = arr + 4;
+  mystl::advance(p, -2);
+  EXPECT_EQ(*p, 3);
+}
+
+TEST(AdvanceTest, ZeroAdvance) {
+  int arr[] = {1, 2, 3};
+  int* p = arr + 1;
+  mystl::advance(p, 0);
+  EXPECT_EQ(*p, 2);
+}
+```
+
+## 后续扩展
+
+迭代器是算法和容器之间的桥梁。接下来需要：
+
+- **util.h** — `move`、`forward`、`swap`、`pair`，提供 move 语义支持
+- **construct.h** — 用 placement new 在原始内存上构造对象，用 tag dispatch 优化平凡类型的析构
+- **allocator.h** — 内存分配器，管理容器的内存分配和释放

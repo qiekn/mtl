@@ -2,6 +2,7 @@
 add_executable(mystl_test
   main.cpp
   type_traits_test.cpp
+  iterator_test.cpp
 )
 
 # 包含自己实现的 STL 头文件目录
