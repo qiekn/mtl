@@ -31,4 +31,29 @@ using bool_constant = integral_constant<bool, B>;
 using true_type = bool_constant<true>;
 using false_type = bool_constant<false>;
 
+// remove_reference strips lvalue and rvalue references from T.
+//
+// Primary template: T is not a reference, so type is T itself.
+// Partial specialization for T&: strips lvalue reference.
+// Partial specialization for T&&: strips rvalue reference.
+template <class T>
+struct remove_reference { typedef T type; };
+
+template <class T>
+struct remove_reference<T&> { typedef T type; };
+
+template <class T>
+struct remove_reference<T&&> { typedef T type; };
+
+template <class T>
+using remove_reference_t = typename remove_reference<T>::type;
+
+// is_lvalue_reference determines whether T is an lvalue reference type.
+// Used by forward() to guard against incorrect usage.
+template <class T>
+struct is_lvalue_reference : false_type {};
+
+template <class T>
+struct is_lvalue_reference<T&> : true_type {};
+
 }  // namespace mystl

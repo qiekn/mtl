@@ -1,0 +1,464 @@
+---
+title: "util.h (上) - move, forward, swap"
+date: "2025-02-10"
+tags: ["stl", "move-semantics", "perfect-forwarding", "template"]
+order: 3
+toc: true
+---
+
+## 前置知识
+
+### 左值与右值
+
+最直觉的区分：**能不能取地址**。
+
+```cpp
+int x = 10;
+&x;        // OK，x 是左值，有固定的内存地址
+&10;       // 编译错误，10 是右值，临时的值，没有地址
+&(x + 1);  // 编译错误，x + 1 的结果是右值
+```
+
+我们所熟悉的 `int& ref = x` 是 **左值引用** —— 只能绑定左值。
+
+C++11 中新增了 **右值引用** `&&`，只能绑定右值：
+
+```cpp
+int&& r = 10;       // OK，10 是右值
+int&& r2 = x;       // 编译错误，x 是左值
+int&& r3 = x + 1;   // OK，x + 1 的结果是右值
+```
+
+
+### 为什么需要右值引用？
+
+假设一个类持有大量堆内存：
+
+```cpp
+class BigData {
+  int* data;
+  size_t size;
+
+  // 拷贝构造：分配新内存，逐个复制，O(n)
+  BigData(const BigData& other) {
+    size = other.size;
+    data = new int[size];
+    for (size_t i = 0; i < size; i++)
+      data[i] = other.data[i];
+  }
+};
+```
+
+当你写 `BigData b = createBigData();` 时，`createBigData()` 返回一个临时对象（右值），拷贝构造会逐个复制一百万个元素。但这个临时对象马上就要销毁——拷贝完全是浪费。
+
+
+如果能"偷走"临时对象的指针：
+
+```cpp
+// 移动构造：偷走资源，O(1)
+BigData(BigData&& other) {        // 参数是右值引用
+  size = other.size;
+  data = other.data;              // 直接拿走指针
+  other.data = nullptr;           // 让原对象放弃所有权
+  other.size = 0;
+}
+```
+
+编译器看到参数是右值（临时对象），就调用移动构造而非拷贝构造。
+
+
+> 注意：`BigData foo = CreateBigData();` 理论上 `CreateBigData` 内部创建临时对象，返回应该有一次拷贝或移动。但是现代编译器默认开启 **RVO (Return Value Optimization)**。编译器直接在 `foo` 的内存地址上构造对象，完全跳过了拷贝和移动步骤。C++17 之后 RVO 更是强制要求。下面的测试代码可以观察到这一点。
+
+我们可以写一个简单的测试来观察构造函数的调用情况：
+
+```cpp
+#include <iostream>
+
+using namespace std;
+
+class BigData {
+public:
+  // 写一个简单的默认构造
+  BigData() {
+    cout << "构造" << endl;
+    size_ = 3;
+    data_ = new int[3]{1, 2, 3};
+  }
+
+  // 拷贝构造：分配新内存，逐个复制，O(n)
+  BigData(const BigData& other) {
+    cout << "拷贝构造" << endl;
+    size_ = other.size_;
+    data_ = new int[size_];
+    for (size_t i = 0; i < size_; i++)
+      data_[i] = other.data_[i];
+  }
+
+  // 移动构造：偷走资源，O(1)
+  BigData(BigData&& other) {  // 参数是右值引用
+    cout << "移动构造" << endl;
+    size_ = other.size_;
+    data_ = other.data_;    // 直接拿走指针
+    other.data_ = nullptr;  // 让原对象放弃所有权
+    other.size_ = 0;
+  }
+
+  ~BigData() {
+    if (size_ != 0) {
+      cout << "析构，清理 Data" << endl;
+      delete [] data_;
+    } else {
+      cout << "析构，无需清理" << endl;
+    }
+  }
+
+private:
+  size_t size_;
+  int* data_;
+};
+
+BigData CreateBigData() {
+  return BigData();
+}
+
+int main() {
+  // case 1
+  {
+    cout << "----------------------\n";
+    BigData a;  // 默认构造
+  }
+  // case 2
+  {
+    cout << "----------------------\n";
+    BigData a;      // 默认构造
+    BigData b = a;  // 拷贝构造
+  }
+  // case 3
+  {
+    cout << "----------------------\n";
+    BigData a;                 // 默认构造
+    BigData c = std::move(a);  // 移动构造
+  }
+  // case 4
+  {
+    cout << "----------------------\n";
+    BigData d = CreateBigData();  // RVO 优化掉，只看到"默认构造"
+  }
+  return 0;
+}
+```
+
+输出：
+
+```
+----------------------
+构造
+析构，清理 Data
+----------------------
+构造
+拷贝构造
+析构，清理 Data
+析构，清理 Data
+----------------------
+构造
+移动构造
+析构，无需清理
+析构，清理 Data
+----------------------
+构造
+析构，清理 Data
+```
+
+- **case 1**：默认构造 + 析构，最简单的情况
+- **case 2**：`BigData b = a` 触发拷贝构造，两个对象都持有数据，析构时各自清理
+- **case 3**：`std::move(a)` 触发移动构造，a 的资源被偷走（`size_ = 0`），析构时无需清理
+- **case 4**：`CreateBigData()` 只看到一次构造——RVO 直接在 `d` 的位置上构造，跳过了拷贝和移动
+
+
+### 引用折叠规则
+
+C++ 中引用遇到引用会"折叠"，规则很简单——**只要有一个 `&`，结果就是 `&`**：
+
+| 组合     | 结果   |
+| ------   | ------ |
+| `T& &`   | `T&`   |
+| `T& &&`  | `T&`   |
+| `T&& &`  | `T&`   |
+| `T&& &&` | `T&&`  |
+
+只有两个都是 `&&` 才得到 `&&`。这条规则是 `forward` 的核心。
+
+## 前置依赖
+
+实现 `move` 和 `forward` 之前，需要在 `type_traits.h` 中添加两个工具。
+
+### `remove_reference`
+
+通过模板偏特化的模式匹配，去掉类型上的引用：
+
+```cpp
+// 传入 int → 匹配主模板，type = int
+template <class T>
+struct remove_reference { typedef T type; };
+
+// 传入 int& → 匹配这个偏特化，拆出 T = int，type = int
+template <class T>
+struct remove_reference<T&> { typedef T type; };
+
+// 传入 int&& → 匹配这个偏特化，拆出 T = int，type = int
+template <class T>
+struct remove_reference<T&&> { typedef T type; };
+
+// 便利别名
+template <class T>
+using remove_reference_t = typename remove_reference<T>::type;
+```
+
+三条路最终都得到不带引用的纯类型。
+
+### `is_lvalue_reference`
+
+判断一个类型是否是左值引用，`forward` 内部用它做安全检查：
+
+```cpp
+template <class T>
+struct is_lvalue_reference : false_type {};
+
+template <class T>
+struct is_lvalue_reference<T&> : true_type {};
+```
+
+## `move`
+
+`move` 是无条件转为右值。`move` 本身不移动任何东西，它只是一个类型转换——把左值"标记"为右值，告诉编译器"这个值我不要了，你可以偷"。
+
+```cpp
+template <class T>
+remove_reference_t<T>&& move(T&& arg) noexcept {
+  return static_cast<remove_reference_t<T>&&>(arg);
+}
+```
+
+使用示例：
+
+```cpp
+BigData a = createBigData();
+BigData b = a;                // 拷贝构造（a 是左值）
+BigData c = mystl::move(a);   // 移动构造（move 把 a 转成右值）
+// 此时 a 的资源已被 c 偷走，a.data == nullptr
+```
+
+为什么需要 remove_reference_t？
+
+参数 `T&&` 是万能引用（universal reference），传左值时 `T` 会被推导为 `int&`。如果直接写 `static_cast<T&&>`：
+
+```
+T = int&  →  T&& = int& && = int&  （引用折叠，得到左值引用，没变成右值！）
+```
+
+必须先用 `remove_reference_t<T>` 把 `int&` 变成 `int`，再加 `&&`：
+
+```
+remove_reference_t<int&> = int  →  int&&  （右值引用，正确）
+```
+
+
+## `forward`
+
+`forward` 是有条件地保留值类别
+
+### 为什么需要 `forward` 
+
+#### 1. 形参永远是左值
+
+```cpp
+template <class T, class Arg>
+T* create(Arg&& arg) {
+    return new T(arg);  // arg 有名字，永远是左值！
+}
+```
+
+不管调用者传的是左值还是右值，`arg` 在函数内部是一个有名字的变量，它永远是左值。和普通函数一样，这导致我们使用 `create` 的时候没有办法调用要创建的对象的移动构造函数，总是调用拷贝构造，性能浪费。
+
+```cpp
+string concat(string s, string suffix) {
+  return s + suffix;
+}
+
+// string("hello") 是右值，但作为形参进了函数内部就有了名字 s ，就是局部变量，是左值
+concat(string("hello"), " world");
+```
+
+
+> 右值的本质是"没人要了"。 一旦你给它起了名字（arg），它就"有人要了"，编译器不敢自作主张去偷它的资源。`forward` 的作用就是告诉编译器："我知道外面传的是右值，你放心偷。"
+
+#### 2. `move` 不行
+
+```cpp
+template <class T, class Arg>
+T* create(Arg&& arg) {
+    return new T(mystl::move(arg));  // 强制移动? 不行
+}
+```
+
+`move` 是无条件的，不管外面传什么都转成右值。如果调用者传了左值（还要继续用的变量），资源就被偷走了，
+而我们的需求是 **传左值就拷贝，传右值就移动**。 `move` 做不到这种 **有条件** 的转换。
+
+```cpp
+string s = "hello";
+create<Person>(s);   // s 被 move，资源被偷
+cout << s;           // s 已经是空的！
+```
+
+
+### 如何实现 `forward`
+
+```cpp
+// 重载 1：参数是左值
+template <class T>
+T&& forward(remove_reference_t<T>& arg) noexcept {
+  return static_cast<T&&>(arg);
+}
+
+// 重载 2：参数是右值
+template <class T>
+T&& forward(remove_reference_t<T>&& arg) noexcept {
+  static_assert(!is_lvalue_reference<T>::value,
+                "cannot forward an rvalue as an lvalue");
+  return static_cast<T&&>(arg);
+}
+```
+
+#### `forward` 如何利用 **引用折叠**
+
+使用时写 `forward<Arg>(arg)`，`Arg` 由外层模板推导：
+
+**传左值时**，`Arg = string&`：
+
+```
+forward<string&>(arg)
+→ T = string&
+→ static_cast<string& &&>(arg)
+→ static_cast<string&>(arg)     // 引用折叠
+→ 返回左值引用 → 调用拷贝构造 ✓
+```
+
+**传右值时**，`Arg = string`：
+
+```
+forward<string>(arg)
+→ T = string
+→ static_cast<string&&>(arg)
+→ 返回右值引用 → 调用移动构造 ✓
+```
+
+#### move vs forward 的本质区别
+
+- **move** 用 `remove_reference_t` 先去掉引用再加 `&&`，无条件得到右值
+- **forward** 直接用 `T&&` 配合引用折叠，根据 `T` 的不同有条件地保留原始值类别
+
+如果 `forward` 也用 `remove_reference_t`，就和 `move` 一样无条件变成右值了。
+
+## swap：交换两个值
+
+有了 `move`，`swap` 就很简单——三次移动代替三次拷贝：
+
+```cpp
+template <class T>
+void swap(T& a, T& b) noexcept {
+  T tmp = mystl::move(a);   // a 的资源给 tmp
+  a = mystl::move(b);       // b 的资源给 a
+  b = mystl::move(tmp);     // tmp 的资源给 b
+}
+```
+
+对于持有堆内存的类型，这只是三次指针交换，O(1)。
+
+数组版本逐个元素交换：
+
+```cpp
+template <class T, size_t N>
+void swap(T (&a)[N], T (&b)[N]) noexcept {
+  for (size_t i = 0; i < N; ++i)
+    swap(a[i], b[i]);
+}
+```
+
+`T (&a)[N]` 是"对长度为 N 的数组的引用"，`N` 由编译器自动推导。
+
+## 完整实现
+
+### type_traits.h（新增部分）
+
+```cpp
+// remove_reference strips lvalue and rvalue references from T.
+template <class T>
+struct remove_reference { typedef T type; };
+
+template <class T>
+struct remove_reference<T&> { typedef T type; };
+
+template <class T>
+struct remove_reference<T&&> { typedef T type; };
+
+template <class T>
+using remove_reference_t = typename remove_reference<T>::type;
+
+// is_lvalue_reference determines whether T is an lvalue reference type.
+template <class T>
+struct is_lvalue_reference : false_type {};
+
+template <class T>
+struct is_lvalue_reference<T&> : true_type {};
+```
+
+### util.h（move, forward, swap）
+
+```cpp
+#pragma once
+
+#include <cstddef>
+
+#include "type_traits.h"
+
+namespace mystl {
+
+template <class T>
+remove_reference_t<T>&& move(T&& arg) noexcept {
+  return static_cast<remove_reference_t<T>&&>(arg);
+}
+
+template <class T>
+T&& forward(remove_reference_t<T>& arg) noexcept {
+  return static_cast<T&&>(arg);
+}
+
+template <class T>
+T&& forward(remove_reference_t<T>&& arg) noexcept {
+  static_assert(!is_lvalue_reference<T>::value,
+                "cannot forward an rvalue as an lvalue");
+  return static_cast<T&&>(arg);
+}
+
+template <class T>
+void swap(T& a, T& b) noexcept {
+  T tmp = mystl::move(a);
+  a = mystl::move(b);
+  b = mystl::move(tmp);
+}
+
+template <class T, size_t N>
+void swap(T (&a)[N], T (&b)[N]) noexcept {
+  for (size_t i = 0; i < N; ++i)
+    swap(a[i], b[i]);
+}
+
+}  // namespace mystl
+```
+
+## 后续扩展
+
+接下来在 `util.h` 中继续实现：
+
+- **pair** — 存储两个不同类型值的结构体，`map` 的元素类型就是 `pair<const Key, Value>`
+- **make_pair** — 工厂函数，自动推导类型
