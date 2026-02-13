@@ -1,0 +1,399 @@
+---
+title: "util.h (下) - pair"
+date: "2025-02-11"
+tags: ["stl", "pair", "template", "operator-overloading"]
+order: 4
+toc: true
+---
+
+## 什么是 pair？
+
+`pair` 是 STL 中最简单的"容器"——把两个可能不同类型的值绑在一起：
+
+```cpp
+pair<string, int> p("Alice", 20);
+p.first;   // "Alice"
+p.second;  // 20
+```
+
+它在 STL 中到处出现：
+- `map` 的元素是 `pair<const Key, Value>`
+- 很多算法返回 `pair`，比如 `equal_range` 返回两个迭代器的 pair
+
+标准库把 `pair` 放在 `<utility>` 头文件中（和 `move`、`forward`、`swap` 一起），因为它太基础了，几乎所有容器和算法都依赖它。
+
+## 基本结构
+
+核心就是一个模板结构体加两个公开成员：
+
+```cpp
+template <class T1, class T2>
+struct pair {
+  typedef T1 first_type;
+  typedef T2 second_type;
+
+  T1 first;
+  T2 second;
+};
+```
+
+`typedef` 暴露了类型信息，让外部可以通过 `pair::first_type` 获取类型。
+
+看一个实际场景——你写了一个泛型函数，接收一个 pair，想声明一个和 `first` 同类型的变量：
+
+```cpp
+template <class P>
+void process(const P& p) {
+  // P 是 pair<string, int>，但这里只知道 P
+  // 如何声明一个和 first 同类型的变量？
+  typename P::first_type copy = p.first;  // OK，first_type = string
+}
+```
+
+没有 `typedef`，就无法从 `P` 中提取出 `string` 这个类型。这和 `iterator_traits` 里的 `typedef` 是同一个思路——都是为了让泛型代码在编译期获取类型信息。STL 中几乎所有组件（容器、迭代器、分配器）都遵循这个约定。
+
+C++11 之后可以用 `auto` 和 `decltype` 绕过，但 `typedef` 在模板元编程场景下仍然更清晰。
+
+### typedef 和 typename 的区别
+
+这两个关键字经常一起出现但作用完全不同：
+
+**typedef** — 创建类型别名，给已有类型起一个新名字：
+
+```cpp
+typedef int score;        // score 就是 int
+typedef T1 first_type;    // first_type 就是 T1
+```
+
+C++11 之后可以用 `using` 替代，写法更直观：
+
+```cpp
+using score = int;         // 等价于 typedef int score
+using first_type = T1;     // 等价于 typedef T1 first_type
+```
+
+**typename** — 告诉编译器某个名字是"类型"而非"值"。只在模板中需要：
+
+```cpp
+template <class P>
+void process(const P& p) {
+  typename P::first_type copy = p.first;
+//^^^^^^^^ 必须加，否则编译器不知道 P::first_type 是类型还是静态成员
+}
+```
+
+为什么编译器不知道？因为 `P` 是模板参数，编译器在实例化之前无法确定 `P::first_type` 是什么。它可能是类型（`typedef T1 first_type`），也可能是静态变量（`static int first_type`）。`typename` 消除了这个歧义。
+
+简单记忆：
+- `typedef` / `using`：**创建**类型别名
+- `typename`：**声明**某个名字是类型
+
+## 构造函数
+
+### 默认构造
+
+值初始化两个成员（`int` 为 0，`string` 为空）：
+
+```cpp
+pair() : first(), second() {}
+```
+
+### 值构造
+
+从两个 const 引用拷贝：
+
+```cpp
+pair(const T1& a, const T2& b) : first(a), second(b) {}
+```
+
+### 转发构造
+
+这是最有意思的部分。注意模板参数 `U1`、`U2` 和 pair 自身的 `T1`、`T2` 不同：
+
+```cpp
+template <class U1, class U2>
+pair(U1&& a, U2&& b)
+    : first(mystl::forward<U1>(a)), second(mystl::forward<U2>(b)) {}
+```
+
+`T1`、`T2` 是 pair 的类型，创建时就确定了。`U1`、`U2` 由编译器从参数推导：
+
+```cpp
+pair<string, int> p("hello", 42);
+// T1 = string, T2 = int（pair 的类型，已固定）
+// U1 = const char*, U2 = int（从参数推导）
+```
+
+`const char*` 可以隐式转换为 `string`，所以能用不同但兼容的类型来构造。
+
+配合 `forward`，传左值就拷贝，传右值就移动：
+
+```cpp
+string s = "hello";
+pair<string, int> p1(s, 1);           // s 是左值 → 拷贝
+pair<string, int> p2(string("hi"), 2); // 临时对象是右值 → 移动
+```
+
+### 为什么同时保留值构造和转发构造？
+
+模板构造函数在重载决议中"太贪心"——它能匹配几乎任何参数。看这个场景：
+
+```cpp
+pair<int, int> p1(1, 2);
+pair<int, int> p2(p1);  // 想调用拷贝构造
+```
+
+`p2(p1)` 本意是拷贝构造。但 `p1` 是非 const 左值，模板版本推导出 `U1 = pair<int, int>&`，比 `pair(const pair&)` 更精确匹配（不需要加 const），编译器可能优先选模板版本。
+
+显式的 `pair(const T1&, const T2&)` 作为非模板函数，避免了这类歧义。
+
+### 拷贝和移动构造
+
+直接用编译器默认生成的版本：
+
+```cpp
+pair(const pair& other) = default;
+pair(pair&& other) = default;
+```
+
+`= default` 告诉编译器"用你自己生成的版本就行"——逐成员拷贝或逐成员移动。
+
+## 赋值运算符
+
+### 拷贝赋值
+
+```cpp
+pair& operator=(const pair& other) {
+  first = other.first;
+  second = other.second;
+  return *this;
+}
+```
+
+`return *this` 是 C++ 赋值运算符的惯例，支持链式赋值 `a = b = c`。
+
+### 移动赋值
+
+```cpp
+pair& operator=(pair&& other) noexcept {
+  first = mystl::move(other.first);
+  second = mystl::move(other.second);
+  return *this;
+}
+```
+
+标记 `noexcept` 是因为移动赋值不应该抛异常——STL 容器在内部搬移元素时，会优先使用标记了 `noexcept` 的移动操作。
+
+## swap
+
+成员函数，交换两个 pair 的内容：
+
+```cpp
+void swap(pair& other) {
+  mystl::swap(first, other.first);
+  mystl::swap(second, other.second);
+}
+```
+
+## 比较运算符
+
+pair 的比较是**字典序**（lexicographic）——先比 `first`，相等再比 `second`：
+
+```cpp
+template <class T1, class T2>
+bool operator==(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return a.first == b.first && a.second == b.second;
+}
+
+template <class T1, class T2>
+bool operator<(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return a.first < b.first ||
+         (a.first == b.first && a.second < b.second);
+}
+```
+
+有了 `==` 和 `<`，其余四个运算符都可以用它们推导：
+
+```cpp
+!= → !(a == b)
+>  → b < a
+<= → !(b < a)
+>= → !(a < b)
+```
+
+## make_pair
+
+工厂函数，让编译器自动推导类型，不用手写模板参数：
+
+```cpp
+template <class T1, class T2>
+pair<T1, T2> make_pair(T1&& a, T2&& b) {
+  return pair<T1, T2>(mystl::forward<T1>(a), mystl::forward<T2>(b));
+}
+```
+
+```cpp
+auto p = mystl::make_pair(1, "hello");
+// 编译器推导出 pair<int, const char*>
+```
+
+## 完整实现
+
+pair 部分的代码（位于 `util.h` 中，`swap` 之后）：
+
+```cpp
+template <class T1, class T2>
+struct pair {
+  typedef T1 first_type;
+  typedef T2 second_type;
+
+  T1 first;
+  T2 second;
+
+  pair() : first(), second() {}
+
+  pair(const T1& a, const T2& b) : first(a), second(b) {}
+
+  template <class U1, class U2>
+  pair(U1&& a, U2&& b)
+      : first(mystl::forward<U1>(a)), second(mystl::forward<U2>(b)) {}
+
+  pair(const pair& other) = default;
+  pair(pair&& other) = default;
+
+  pair& operator=(const pair& other) {
+    first = other.first;
+    second = other.second;
+    return *this;
+  }
+
+  pair& operator=(pair&& other) noexcept {
+    first = mystl::move(other.first);
+    second = mystl::move(other.second);
+    return *this;
+  }
+
+  void swap(pair& other) {
+    mystl::swap(first, other.first);
+    mystl::swap(second, other.second);
+  }
+};
+
+template <class T1, class T2>
+bool operator==(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return a.first == b.first && a.second == b.second;
+}
+
+template <class T1, class T2>
+bool operator!=(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return !(a == b);
+}
+
+template <class T1, class T2>
+bool operator<(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return a.first < b.first || (a.first == b.first && a.second < b.second);
+}
+
+template <class T1, class T2>
+bool operator>(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return b < a;
+}
+
+template <class T1, class T2>
+bool operator<=(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return !(b < a);
+}
+
+template <class T1, class T2>
+bool operator>=(const pair<T1, T2>& a, const pair<T1, T2>& b) {
+  return !(a < b);
+}
+
+template <class T1, class T2>
+pair<T1, T2> make_pair(T1&& a, T2&& b) {
+  return pair<T1, T2>(mystl::forward<T1>(a), mystl::forward<T2>(b));
+}
+```
+
+## 单元测试
+
+```cpp
+#include "util.h"
+#include <gtest/gtest.h>
+#include <string>
+
+TEST(PairTest, DefaultConstruct) {
+  mystl::pair<int, int> p;
+  EXPECT_EQ(p.first, 0);
+  EXPECT_EQ(p.second, 0);
+}
+
+TEST(PairTest, ValueConstruct) {
+  mystl::pair<int, std::string> p(1, "hello");
+  EXPECT_EQ(p.first, 1);
+  EXPECT_EQ(p.second, "hello");
+}
+
+TEST(PairTest, CopyConstruct) {
+  mystl::pair<int, int> a(3, 4);
+  mystl::pair<int, int> b(a);
+  EXPECT_EQ(b.first, 3);
+  EXPECT_EQ(b.second, 4);
+}
+
+TEST(PairTest, MoveConstruct) {
+  mystl::pair<int, std::string> a(1, "hello");
+  mystl::pair<int, std::string> b(mystl::move(a));
+  EXPECT_EQ(b.first, 1);
+  EXPECT_EQ(b.second, "hello");
+}
+
+TEST(PairTest, CopyAssign) {
+  mystl::pair<int, int> a(1, 2);
+  mystl::pair<int, int> b;
+  b = a;
+  EXPECT_EQ(b.first, 1);
+  EXPECT_EQ(b.second, 2);
+}
+
+TEST(PairTest, MoveAssign) {
+  mystl::pair<int, std::string> a(1, "hello");
+  mystl::pair<int, std::string> b;
+  b = mystl::move(a);
+  EXPECT_EQ(b.first, 1);
+  EXPECT_EQ(b.second, "hello");
+}
+
+TEST(PairTest, Swap) {
+  mystl::pair<int, int> a(1, 2), b(3, 4);
+  a.swap(b);
+  EXPECT_EQ(a.first, 3);
+  EXPECT_EQ(b.first, 1);
+}
+
+TEST(PairTest, EqualAndNotEqual) {
+  mystl::pair<int, int> a(1, 2), b(1, 2), c(1, 3);
+  EXPECT_TRUE(a == b);
+  EXPECT_TRUE(a != c);
+}
+
+TEST(PairTest, LessThan) {
+  mystl::pair<int, int> a(1, 2), b(1, 3), c(2, 0);
+  EXPECT_TRUE(a < b);   // same first, compare second
+  EXPECT_TRUE(a < c);   // first differs
+  EXPECT_FALSE(b < a);
+}
+
+TEST(PairTest, MakePair) {
+  auto p = mystl::make_pair(1, 2);
+  EXPECT_EQ(p.first, 1);
+  EXPECT_EQ(p.second, 2);
+}
+```
+
+## 后续扩展
+
+`util.h` 到这里就完成了。接下来进入 Phase 1.4：
+
+- **construct.h** — 用 placement new 在原始内存上构造对象，用 tag dispatch 优化平凡类型的析构
+- **allocator.h** — 内存分配器，管理容器的内存分配和释放
